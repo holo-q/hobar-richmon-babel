@@ -60,6 +60,7 @@ fn state_to_color(state: ActivityState) -> &'static str {
         ActivityState::Idle => "#666666",           // Dim gray
         ActivityState::Thinking => "#f0c040",       // Gold - generating
         ActivityState::ToolUse => "#40c0f0",        // Cyan - tool running
+        ActivityState::PlanApproval => "#c080f0",   // Purple - plan review
         ActivityState::BackgroundTask => "#40f0c0", // Teal - bg work
         ActivityState::AwaitingInput => "#f04080",  // Rose - needs input
         ActivityState::Unknown => "#454545",        // Darker gray
