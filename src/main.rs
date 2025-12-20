@@ -1,8 +1,8 @@
-//! Richmon-Babel Panel Indicator
+//! Richmon-Babel Panel Indicator — the tower's vital signs visible from outside
 //!
 //! Subscribes to babel daemon events and sends manifest payloads to the richmon
 //! panel indicator for multi-indicator display. Each active Claude session gets
-//! its own dot in the panel, with color based on activity state.
+//! its own dot in the panel — worker souls made visible, pulsing with their current labor.
 //!
 //! ## Usage
 //!
@@ -47,14 +47,21 @@ use claude_babel::ActivityState;
 
 const RICHMON_SOCKET: &str = "/tmp/richmon-post-babel.sock";
 
-/// Heartbeat interval for manifest re-posting
+/// Heartbeat interval for manifest re-posting — the pulse ensuring the world sees us
 /// Ensures richmon gets updated state after restart/reload
 const HEARTBEAT_INTERVAL_SECS: u64 = 2;
 
-/// Map ActivityState to hex color
+/// Map ActivityState to hex color — the hue of the worker's current breath
 ///
 /// Colors match richspace-babel for consistency across panel indicators.
-/// These are state-based, not activity pulse based.
+/// Each hue reveals what the worker is doing:
+/// - Idle: Dim gray — resting
+/// - Thinking: Gold — mind at work, generating thoughts
+/// - ToolUse: Cyan — hands moving, executing commands
+/// - PlanApproval: Purple — considering the path ahead
+/// - BackgroundTask: Teal — working in the depths
+/// - AwaitingInput: Rose — seeking the user's voice
+/// - Unknown: Darker gray — newly arrived
 fn state_to_color(state: ActivityState) -> &'static str {
     match state {
         ActivityState::Idle => "#666666",           // Dim gray
@@ -102,12 +109,13 @@ impl SessionState {
     }
 }
 
-/// Session tracker - maintains state for all active Claude sessions
+/// Session tracker — gathering the workers into a unified view
 ///
 /// Uses IndexMap to preserve left-to-right screen position order.
 /// Babel sends windows in sorted order (by screen position), and we maintain
 /// that ordering through all operations. This ensures the manifest JSON keys
-/// appear in visual left-to-right order for the panel display.
+/// appear in visual left-to-right order for the panel display, showing worker
+/// souls as they appear across the screen.
 struct SessionTracker {
     /// Active sessions keyed by kitty window ID (stable identifier)
     /// Order preserved: left-to-right screen position
@@ -170,13 +178,14 @@ impl SessionTracker {
         }
     }
 
-    /// Generate JSON manifest of all tracked sessions
+    /// Generate JSON manifest of all tracked sessions — the tower's face made manifest
     ///
     /// Format: {"session-id-1": {"color": "#f0c040", "workspace": 7}, ...}
     /// Workspace included for grouping/spacing in panel display.
     ///
     /// Order preservation: IndexMap iteration maintains insertion order,
     /// which reflects left-to-right screen position (babel sends sorted windows).
+    /// The manifest shows worker souls in their natural order.
     fn to_manifest(&self) -> String {
         let entries: Vec<String> = self.sessions.iter()
             .map(|(kitty_id, state)| {
