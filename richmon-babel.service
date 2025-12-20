@@ -1,0 +1,15 @@
+[Unit]
+Description=Richmon panel indicator for babel-managed Claude sessions
+After=babel.service
+
+[Service]
+Type=simple
+ExecStart=%h/bin/richmon-babel
+Restart=on-failure
+RestartSec=3
+
+# Environment
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=default.target
