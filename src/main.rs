@@ -47,6 +47,10 @@ use claude_babel::ActivityState;
 
 const RICHMON_SOCKET: &str = "/tmp/richmon-post-babel.sock";
 
+/// Heartbeat interval for manifest re-posting
+/// Ensures richmon gets updated state after restart/reload
+const HEARTBEAT_INTERVAL_SECS: u64 = 2;
+
 /// Map ActivityState to hex color
 ///
 /// Colors match richspace-babel for consistency across panel indicators.
@@ -288,29 +292,48 @@ async fn run_subscriber() -> Result<()> {
         }
     }
 
-    // Process events
+    // Process events with periodic heartbeat
+    // Heartbeat ensures richmon gets updated state after restart/reload
+    let mut heartbeat = tokio::time::interval(
+        std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)
+    );
+
     loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await?;
-        if bytes_read == 0 {
-            tracing::info!("Babel connection closed");
-            return Ok(());
-        }
-
-        let response: Response = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to parse event, skipping");
-                continue;
+        tokio::select! {
+            // Heartbeat tick - re-post manifest to handle richmon restarts
+            _ = heartbeat.tick() => {
+                if !tracker.is_empty() {
+                    post_manifest(&tracker.to_manifest());
+                }
             }
-        };
 
-        if let Response::Event { event } = response {
-            let should_post = handle_event(&mut tracker, event.event);
+            // Read next line from babel
+            result = reader.read_line(&mut line) => {
+                let bytes_read = result?;
+                if bytes_read == 0 {
+                    tracing::info!("Babel connection closed");
+                    return Ok(());
+                }
 
-            // Post manifest after state-changing events
-            if should_post {
-                post_manifest(&tracker.to_manifest());
+                let response: Response = match serde_json::from_str(&line) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to parse event, skipping");
+                        line.clear();
+                        continue;
+                    }
+                };
+
+                if let Response::Event { event } = response {
+                    let should_post = handle_event(&mut tracker, event.event);
+
+                    // Post manifest after state-changing events
+                    if should_post {
+                        post_manifest(&tracker.to_manifest());
+                    }
+                }
+
+                line.clear();
             }
         }
     }
