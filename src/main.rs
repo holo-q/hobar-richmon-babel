@@ -42,14 +42,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use claude_babel::events::BabelEvent;
+use claude_babel::logging::format_event;
 use claude_babel::utility::ipc::{Request, Response};
 use claude_babel::ActivityState;
 
 const RICHMON_SOCKET: &str = "/tmp/richmon-post-babel.sock";
-
-/// Heartbeat interval for manifest re-posting — the pulse ensuring the world sees us
-/// Ensures richmon gets updated state after restart/reload
-const HEARTBEAT_INTERVAL_SECS: u64 = 2;
 
 /// Map ActivityState to hex color — the hue of the worker's current breath
 ///
@@ -131,7 +128,6 @@ impl SessionTracker {
 
     /// Add a new session (from WindowAdded)
     fn add(&mut self, kitty_id: u64, workspace: Option<i32>) {
-        tracing::debug!(kitty_id, ?workspace, "Tracking new session");
         self.sessions.insert(kitty_id, SessionState::new(workspace));
     }
 
@@ -139,14 +135,12 @@ impl SessionTracker {
     ///
     /// Uses shift_remove to maintain left-to-right order of remaining sessions.
     fn remove(&mut self, kitty_id: u64) {
-        tracing::debug!(kitty_id, "Removing session");
         self.sessions.shift_remove(&kitty_id);
     }
 
     /// Update session ID (from SessionMatched)
     fn set_session_id(&mut self, kitty_id: u64, session_id: String) {
         if let Some(state) = self.sessions.get_mut(&kitty_id) {
-            tracing::debug!(kitty_id, %session_id, "Session matched");
             state.session_id = Some(session_id);
         }
     }
@@ -157,14 +151,13 @@ impl SessionTracker {
     /// what Claude is actually doing (thinking, tool use, awaiting input, etc.)
     fn update_state(&mut self, kitty_id: u64, new_state: ActivityState, workspace: Option<i32>) {
         if let Some(state) = self.sessions.get_mut(&kitty_id) {
-            tracing::debug!(kitty_id, ?new_state, "State updated");
             state.activity_state = new_state;
             if workspace.is_some() {
                 state.workspace = workspace;
             }
         } else {
             // Session not tracked yet - add it with the state
-            tracing::debug!(kitty_id, ?new_state, "Auto-tracking session from state change");
+            tracing::debug!("Tracker::AutoAdd {{ k{}, {:?} }}", kitty_id, new_state);
             let mut state = SessionState::new(workspace);
             state.activity_state = new_state;
             self.sessions.insert(kitty_id, state);
@@ -302,61 +295,63 @@ async fn run_subscriber() -> Result<()> {
         }
     }
 
-    // Process events with periodic heartbeat
-    // Heartbeat ensures richmon gets updated state after restart/reload
-    let mut heartbeat = tokio::time::interval(
-        std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)
-    );
-
+    // Process events - pure event-driven, no polling
     loop {
-        tokio::select! {
-            // Heartbeat tick - re-post manifest to handle richmon restarts
-            _ = heartbeat.tick() => {
-                if !tracker.is_empty() {
-                    post_manifest(&tracker.to_manifest());
-                }
-            }
+        let bytes_read = reader.read_line(&mut line).await?;
+        if bytes_read == 0 {
+            tracing::info!("Babel connection closed");
+            return Ok(());
+        }
 
-            // Read next line from babel
-            result = reader.read_line(&mut line) => {
-                let bytes_read = result?;
-                if bytes_read == 0 {
-                    tracing::info!("Babel connection closed");
-                    return Ok(());
-                }
-
-                let response: Response = match serde_json::from_str(&line) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to parse event, skipping");
-                        line.clear();
-                        continue;
-                    }
-                };
-
-                if let Response::Event { event } = response {
-                    let should_post = handle_event(&mut tracker, event.event);
-
-                    // Post manifest after state-changing events
-                    if should_post {
-                        post_manifest(&tracker.to_manifest());
-                    }
-                }
-
+        let response: Response = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to parse event, skipping");
                 line.clear();
+                continue;
+            }
+        };
+
+        if let Response::Event { event } = response {
+            let should_post = handle_event(&mut tracker, event.event);
+
+            // Post manifest after state-changing events
+            if should_post {
+                post_manifest(&tracker.to_manifest());
             }
         }
+
+        line.clear();
     }
 }
 
 /// Handle babel event - returns true if manifest should be posted
 fn handle_event(tracker: &mut SessionTracker, event: BabelEvent) -> bool {
+    // Log event with full context using standardized format
+    match &event {
+        // High-frequency events at trace level
+        BabelEvent::ActivityPulse { .. } => {
+            tracing::trace!("{}", format_event(&event));
+        }
+        // State changes at info level
+        BabelEvent::SessionStateChanged { .. } |
+        BabelEvent::WindowWorkspaceChanged { .. } |
+        BabelEvent::WSetSaved { .. } |
+        BabelEvent::WSetLoaded { .. } |
+        BabelEvent::DaemonShutdown => {
+            tracing::info!("{}", format_event(&event));
+        }
+        // Everything else at debug level
+        _ => {
+            tracing::debug!("{}", format_event(&event));
+        }
+    }
+
+    // Process event and return whether to update manifest
     match event {
         // Window lifecycle - add/remove from tracking
         BabelEvent::WindowAdded { kitty_id, workspace, .. } => {
-            tracing::debug!(kitty_id, ?workspace, "Window added");
             tracker.add(kitty_id, workspace);
-
             // Get initial state for the new window
             let state = claude_babel::utility::claude_discovery::get_window_activity_state(kitty_id);
             tracker.update_state(kitty_id, state, workspace);
@@ -364,59 +359,37 @@ fn handle_event(tracker: &mut SessionTracker, event: BabelEvent) -> bool {
         }
 
         BabelEvent::WindowRemoved { kitty_id } => {
-            tracing::debug!(kitty_id, "Window removed");
             tracker.remove(kitty_id);
             true
         }
 
         // Session matching - associate session ID with kitty window
         BabelEvent::SessionMatched { kitty_id, session_id, .. } => {
-            tracing::debug!(kitty_id, %session_id, "Session matched");
             tracker.set_session_id(kitty_id, session_id);
             true
         }
 
         // State change - PRIMARY DRIVER for color updates
-        // This is what makes the dots change color based on Claude's actual state
-        BabelEvent::SessionStateChanged { kitty_id, workspace, new_state, old_state, .. } => {
-            tracing::info!(
-                kitty_id,
-                ?old_state,
-                ?new_state,
-                "Session state changed"
-            );
+        BabelEvent::SessionStateChanged { kitty_id, workspace, new_state, .. } => {
             tracker.update_state(kitty_id, new_state, workspace);
             true
         }
 
         // Window moved to different workspace
         BabelEvent::WindowWorkspaceChanged { kitty_id, new_workspace, .. } => {
-            tracing::debug!(kitty_id, ?new_workspace, "Window workspace changed");
             tracker.update_workspace(kitty_id, new_workspace);
             true
         }
 
         // Activity pulses - we don't use these for coloring anymore
-        // State-based coloring is more accurate and stable
-        BabelEvent::ActivityPulse { .. } => {
-            false // Don't trigger manifest update on pulses
-        }
+        BabelEvent::ActivityPulse { .. } => false,
 
-        // WSet operations - visual confirmation (brief color flash)
-        BabelEvent::WSetSaved { name, .. } => {
-            tracing::info!(%name, "WSet saved");
-            false // Could add flash effect later
-        }
-        BabelEvent::WSetLoaded { name, .. } => {
-            tracing::info!(%name, "WSet loaded");
-            false // Could add flash effect later
-        }
+        // WSet operations - just logged, no manifest update
+        BabelEvent::WSetSaved { .. } |
+        BabelEvent::WSetLoaded { .. } => false,
 
         // Daemon shutdown - clean exit
-        BabelEvent::DaemonShutdown => {
-            tracing::info!("Babel daemon shutting down");
-            false
-        }
+        BabelEvent::DaemonShutdown => false,
 
         // Other events - ignore
         _ => false,
