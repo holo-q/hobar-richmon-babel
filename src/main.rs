@@ -76,40 +76,63 @@ fn send_event(event: &IndicatorEvent) {
     }
 }
 
+/// Cache for mapping kitty_id → platform_window_id for geometry lookups
+/// Populated from initial fetch and updated on WindowAdded events
+type PlatformIdCache = std::collections::HashMap<u64, u64>;
+
 /// Fetch initial window list from babel and send Set events
-async fn fetch_initial_state() -> Result<()> {
+/// Windows are already sorted by screen position by babel
+async fn fetch_initial_state() -> Result<PlatformIdCache> {
     use claude_babel::utility::ipc::send_request;
+    use claude_babel::kitty::{get_pane, get_window_geometry};
+    use std::collections::HashMap;
 
     tracing::info!("Fetching initial window list from babel");
+
+    // Cache kitty_id -> platform_window_id for geometry lookups on events
+    let mut platform_id_cache: PlatformIdCache = HashMap::new();
 
     match send_request(&Request::List).await {
         Ok(Response::Windows { windows }) => {
             tracing::info!(count = windows.len(), "Got initial window list");
-            for window in windows {
+            for window in &windows {
                 let id = window.id();
+                let platform_id = window.platform_window_id;
+
+                // Cache the mapping for use in event handling
+                platform_id_cache.insert(id, platform_id);
+
+                // Get geometry: prefer patched kitty per-pane, fallback to xdotool
+                let x_pos = get_pane(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|p| p.screen.map(|s| s.x))
+                    .or_else(|| get_window_geometry(platform_id).ok().map(|g| g.x));
+
                 let state = claude_babel::utility::claude_discovery::get_window_activity_state(id);
                 let event = IndicatorEvent::Set {
                     id: indicator_id(id),
                     color: state_to_color(state).to_string(),
                     workspace: window.workspace.unwrap_or(0) as u32,
+                    x_pos,
                 };
                 send_event(&event);
             }
-            Ok(())
+            Ok(platform_id_cache)
         }
         Ok(other) => {
             tracing::warn!(?other, "Unexpected response to List request");
-            Ok(())
+            Ok(HashMap::new())
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to fetch initial window list");
-            Ok(())
+            Ok(HashMap::new())
         }
     }
 }
 
 /// Subscribe to babel events
-async fn subscribe_to_events() -> Result<()> {
+async fn subscribe_to_events(platform_id_cache: &mut PlatformIdCache) -> Result<()> {
     let socket_path = claude_babel::utility::ipc::socket_path();
     tracing::info!("Connecting to babel");
 
@@ -160,7 +183,7 @@ async fn subscribe_to_events() -> Result<()> {
         };
 
         if let Response::Event { event } = response {
-            if let Some(indicator_event) = handle_event(event.event) {
+            if let Some(indicator_event) = handle_event(event.event, platform_id_cache) {
                 send_event(&indicator_event);
             }
         }
@@ -169,8 +192,60 @@ async fn subscribe_to_events() -> Result<()> {
     }
 }
 
+/// Get fresh geometry for a kitty pane
+///
+/// Strategy:
+/// 1. Patched kitty's per-pane screen geometry (preferred - per-pane coords for splits)
+/// 2. Fallback: xdotool via get_window_geometry (OS window level - temporary until patch deployed)
+///
+/// When patched kitty is running, #1 gives per-pane coordinates even for split layouts.
+/// Until then, #2 gives OS window position (all panes in window share same x).
+fn get_fresh_x_pos(kitty_id: u64, platform_id_cache: &mut PlatformIdCache) -> Option<i32> {
+    use claude_babel::kitty::{get_pane, get_window_geometry};
+
+    match get_pane(kitty_id) {
+        Ok(Some(pane)) => {
+            // Update platform_id cache
+            platform_id_cache.insert(kitty_id, pane.platform_window_id);
+
+            // Prefer patched kitty's per-pane screen geometry
+            if let Some(screen) = &pane.screen {
+                tracing::trace!(kitty_id, x = screen.x, "Kitty per-pane geometry");
+                return Some(screen.x);
+            }
+
+            // Fallback: xdotool for OS window geometry (temporary until patched kitty deployed)
+            match get_window_geometry(pane.platform_window_id) {
+                Ok(geom) => {
+                    tracing::trace!(kitty_id, x = geom.x, "xdotool OS window geometry");
+                    Some(geom.x)
+                }
+                Err(e) => {
+                    tracing::warn!(kitty_id, error = %e, "Geometry lookup failed");
+                    None
+                }
+            }
+        }
+        Ok(None) => {
+            tracing::debug!(kitty_id, "Pane not found in kitty");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(kitty_id, error = %e, "Failed to query kitty");
+            None
+        }
+    }
+}
+
 /// Handle babel event - returns indicator event if state changed
-fn handle_event(event: BabelEvent) -> Option<IndicatorEvent> {
+///
+/// platform_id_cache: Maps kitty_id -> platform_window_id for geometry lookups.
+/// Geometry is fetched fresh on position-affecting events (WindowAdded, WorkspaceChanged)
+/// to ensure sorting reflects current screen layout.
+fn handle_event(
+    event: BabelEvent,
+    platform_id_cache: &mut PlatformIdCache,
+) -> Option<IndicatorEvent> {
     // Log event
     match &event {
         BabelEvent::ActivityPulse { .. } => {
@@ -192,34 +267,45 @@ fn handle_event(event: BabelEvent) -> Option<IndicatorEvent> {
     match event {
         BabelEvent::WindowAdded { kitty_id, workspace, .. } => {
             let state = claude_babel::utility::claude_discovery::get_window_activity_state(kitty_id);
+            // Fresh geometry lookup for new window - essential for correct sorting
+            let x_pos = get_fresh_x_pos(kitty_id, platform_id_cache);
             Some(IndicatorEvent::Set {
                 id: indicator_id(kitty_id),
                 color: state_to_color(state).to_string(),
                 workspace: workspace.unwrap_or(0) as u32,
+                x_pos,
             })
         }
 
         BabelEvent::WindowRemoved { kitty_id } => {
+            platform_id_cache.remove(&kitty_id);
             Some(IndicatorEvent::Remove {
                 id: indicator_id(kitty_id),
             })
         }
 
         BabelEvent::SessionStateChanged { kitty_id, workspace, new_state, .. } => {
+            // State change doesn't imply position change - use cached or fetch fresh
+            // Fresh fetch ensures we catch any missed moves
+            let x_pos = get_fresh_x_pos(kitty_id, platform_id_cache);
             Some(IndicatorEvent::Set {
                 id: indicator_id(kitty_id),
                 color: state_to_color(new_state).to_string(),
                 workspace: workspace.unwrap_or(0) as u32,
+                x_pos,
             })
         }
 
         BabelEvent::WindowWorkspaceChanged { kitty_id, new_workspace, .. } => {
-            // Need current state to send full Set event
+            // Workspace change often means position change (different monitor, etc.)
+            // MUST refresh geometry for accurate sorting
             let state = claude_babel::utility::claude_discovery::get_window_activity_state(kitty_id);
+            let x_pos = get_fresh_x_pos(kitty_id, platform_id_cache);
             Some(IndicatorEvent::Set {
                 id: indicator_id(kitty_id),
                 color: state_to_color(state).to_string(),
                 workspace: new_workspace.unwrap_or(0) as u32,
+                x_pos,
             })
         }
 
@@ -240,11 +326,11 @@ async fn main() -> Result<()> {
 
     tracing::info!("Starting richmon-babel (event-driven indicators)");
 
-    // Initial state fetch
-    fetch_initial_state().await?;
+    // Initial state fetch - returns platform_id cache for geometry lookups
+    let mut platform_id_cache = fetch_initial_state().await?;
 
-    // Subscribe and process events
-    subscribe_to_events().await?;
+    // Subscribe and process events - geometry refreshed on each position-affecting event
+    subscribe_to_events(&mut platform_id_cache).await?;
 
     Ok(())
 }
