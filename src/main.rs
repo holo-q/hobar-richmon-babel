@@ -38,6 +38,7 @@ use std::os::unix::net::UnixDatagram;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use claude_babel::babel_storage::HookState;
 use claude_babel::events::BabelEvent;
 use claude_babel::indicator::IndicatorEvent;
 use claude_babel::logging::format_event;
@@ -46,7 +47,38 @@ use claude_babel::ActivityState;
 
 const RICHMON_SOCKET: &str = "/tmp/richmon-post-babel.sock";
 
-/// Map ActivityState to hex color
+/// Map hook_state + activity_state to hex color
+///
+/// Hook state is ground truth from Claude Code lifecycle:
+/// - Working (after prompt submit) = Claude is processing
+/// - Idle (after stop) = finished, awaiting input
+///
+/// When hook says Working, we use activity_state for granularity.
+/// When hook says Idle, we show idle regardless of activity_state.
+fn resolve_color(hook_state: Option<HookState>, activity_state: Option<ActivityState>) -> &'static str {
+    match (hook_state, activity_state) {
+        // Hook says Idle → trust it absolutely
+        (Some(HookState::Idle), _) => "#666666",           // Dim gray
+
+        // Hook says Working → use activity_state for granularity
+        (Some(HookState::Working), Some(ActivityState::Thinking)) => "#f0c040",       // Gold
+        (Some(HookState::Working), Some(ActivityState::ToolUse)) => "#40c0f0",        // Cyan
+        (Some(HookState::Working), Some(ActivityState::PlanApproval)) => "#c080f0",   // Purple
+        (Some(HookState::Working), Some(ActivityState::BackgroundTask)) => "#40f0c0", // Teal
+        (Some(HookState::Working), _) => "#f0c040",        // Generic working = Gold
+
+        // No hook state → fall back to activity_state
+        (None, Some(ActivityState::Idle)) => "#666666",           // Dim gray
+        (None, Some(ActivityState::Thinking)) => "#f0c040",       // Gold
+        (None, Some(ActivityState::ToolUse)) => "#40c0f0",        // Cyan
+        (None, Some(ActivityState::PlanApproval)) => "#c080f0",   // Purple
+        (None, Some(ActivityState::BackgroundTask)) => "#40f0c0", // Teal
+        (None, Some(ActivityState::AwaitingInput)) => "#f04080",  // Rose
+        (None, Some(ActivityState::Unknown)) | (None, None) => "#454545", // Darker gray
+    }
+}
+
+/// Legacy: Map ActivityState to hex color (for fallback)
 fn state_to_color(state: ActivityState) -> &'static str {
     match state {
         ActivityState::Idle => "#666666",           // Dim gray
@@ -109,10 +141,12 @@ async fn fetch_initial_state() -> Result<PlatformIdCache> {
                     .and_then(|p| p.screen.map(|s| s.x))
                     .or_else(|| get_window_geometry(platform_id).ok().map(|g| g.x));
 
-                let state = claude_babel::utility::claude_discovery::get_window_activity_state(id);
+                // Use hook_state (ground truth) + activity_state (granularity)
+                // hook_state comes from babel's ClaudePane, populated from hooks
+                let color = resolve_color(window.hook_state, window.activity_state);
                 let event = IndicatorEvent::Set {
                     id: indicator_id(id),
-                    color: state_to_color(state).to_string(),
+                    color: color.to_string(),
                     workspace: window.workspace.unwrap_or(0) as u32,
                     x_pos,
                     ring_intensity: 0.0,
