@@ -115,6 +115,9 @@ async fn fetch_initial_state() -> Result<PlatformIdCache> {
                     color: state_to_color(state).to_string(),
                     workspace: window.workspace.unwrap_or(0) as u32,
                     x_pos,
+                    ring_intensity: 0.0,
+                    has_outline: false,
+                    scale: 1.0,
                 };
                 send_event(&event);
             }
@@ -274,6 +277,9 @@ fn handle_event(
                 color: state_to_color(state).to_string(),
                 workspace: workspace.unwrap_or(0) as u32,
                 x_pos,
+                ring_intensity: 0.0,
+                has_outline: false,
+                scale: 1.0,
             })
         }
 
@@ -293,6 +299,9 @@ fn handle_event(
                 color: state_to_color(new_state).to_string(),
                 workspace: workspace.unwrap_or(0) as u32,
                 x_pos,
+                ring_intensity: 0.0,
+                has_outline: false,
+                scale: 1.0,
             })
         }
 
@@ -306,6 +315,9 @@ fn handle_event(
                 color: state_to_color(state).to_string(),
                 workspace: new_workspace.unwrap_or(0) as u32,
                 x_pos,
+                ring_intensity: 0.0,
+                has_outline: false,
+                scale: 1.0,
             })
         }
 
