@@ -2,8 +2,11 @@
 name = "xfce4-panel-richmon-babel"
 version = "0.1.0"
 edition = "2021"
-description = "Richmon panel indicator daemon for babel-managed Claude sessions"
 authors = ["nuck"]
+description = "Richmon panel indicator daemon for babel-managed terminal sessions"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/holo-q/xfce4-panel-richmon-babel"
+readme = "README.md"
 
 [[bin]]
 name = "richmon-babel"
@@ -23,7 +26,7 @@ anyhow = "1"
 # Logging - Centralized via spaceship-std (~/Workspace/logging.toml with SIGHUP hot-reload)
 # Sink: journald (view with: journalctl -t richmon-babel)
 tracing = "0.1"
-spaceship-std = { version = "0.1", path = "../../Lib/spaceship-std" }
+spaceship-std = { version = "0.2", path = "../spaceship-std" }
 
-# Local dependency - claude-babel for event types and IPC
-claude-babel = { path = "../../Daemons/claude-babel" }
+# Local dependency - babel for protocol types only; no GTK render surface.
+babel = { path = "../babel", default-features = false }
