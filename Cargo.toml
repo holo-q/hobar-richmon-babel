@@ -1,11 +1,11 @@
 [package]
-name = "xfce4-panel-richmon-babel"
+name = "hobar-richmon-babel"
 version = "0.1.0"
 edition = "2021"
 authors = ["nuck"]
-description = "Richmon panel indicator daemon for babel-managed terminal sessions"
+description = "Richmon hobar indicator daemon for babel-managed terminal sessions"
 license = "GPL-2.0-or-later"
-repository = "https://github.com/holo-q/xfce4-panel-richmon-babel"
+repository = "https://github.com/holo-q/hobar-richmon-babel"
 readme = "README.md"
 
 [[bin]]

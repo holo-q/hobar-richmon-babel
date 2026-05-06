@@ -1,4 +1,4 @@
-# xfce4-panel-richmon-babel justfile
+# hobar-richmon-babel justfile
 
 # Build release binary
 build:

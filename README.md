@@ -1,4 +1,4 @@
-# xfce4-panel-richmon-babel
+# hobar-richmon-babel
 
 Thin paint-stream forwarder that relays
 [babel](https://github.com/holo-q/babel)'s `PaintEvent::Window` payloads to
@@ -27,7 +27,7 @@ author's monorepo:
 .
 ├── babel/                          ← github.com/holo-q/babel
 ├── spaceship-std/                  ← github.com/holo-q/spaceship-std (unpublished)
-└── xfce4-panel-richmon-babel/      ← this crate
+└── hobar-richmon-babel/             ← this crate
 ```
 
 To build outside the monorepo, clone the siblings next to this one. Then:
